@@ -1,0 +1,32 @@
+[project]
+name = "sage-agenttrust"
+version = "0.1.0"
+description = "Attestation-verifying proxy that gates writes to a stock SAGE consensus-memory node on a verified cMCP/TRACE attestation."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Dhillon Andrew Kannabhiran", email = "dhillon.andrew@gmail.com" }]
+dependencies = [
+    "agentrust-trace>=0.2",
+    "cmcp-runtime>=0.2.1",   # pulls agent-manifest transitively; we don't use it directly
+    "cryptography>=42",      # imported directly (bridge/identity.py, trace_verify.py)
+    "httpx>=0.27",
+    "starlette>=0.37",
+    "uvicorn>=0.29",
+]
+
+[project.optional-dependencies]
+# pynacl is used ONLY by the offline mock SAGE (tests/mock_sage.py) to verify the Ed25519
+# signature exactly like the real node — not by the bridge runtime, which uses `cryptography`.
+dev = ["agentrust-trace-tests>=0.1", "pynacl>=1.5"]
+
+[project.urls]
+Homepage = "https://github.com/l33tdawg/sage-agenttrust"
+SAGE = "https://github.com/l33tdawg/sage"
+
+[tool.setuptools.packages.find]
+include = ["bridge*", "client*"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"

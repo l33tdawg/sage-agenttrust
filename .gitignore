@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+*.db
+*.key
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+/tmp/
+demo/.sage_demo_agent.key
