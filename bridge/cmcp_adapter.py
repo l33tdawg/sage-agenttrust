@@ -20,9 +20,9 @@ hardware_backed=False and never claim otherwise.
 from __future__ import annotations
 
 import hashlib
-import json
 from typing import Any
 
+import rfc8785
 from cmcp_verify import ApprovedHashes, verify_trace_claim
 
 from bridge.trace_verify import Verdict
@@ -32,8 +32,10 @@ _REQUIRED = {"signature", "attestation_freshness", "policy_bundle.hash", "tool_c
 
 
 def _canonical(claim: dict[str, Any]) -> bytes:
+    # Same recipe as bridge.trace_verify._canonical (RFC 8785 / JCS). This digest is the
+    # bridge's own replay key and badge value, so it must not drift from the TRACE path.
     body = {k: v for k, v in claim.items() if k != "signature"}
-    return json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+    return rfc8785.dumps(body)
 
 
 def verify_cmcp_claim(
@@ -58,12 +60,11 @@ def verify_cmcp_claim(
     except Exception:
         pass
 
-    # CRITICAL HONESTY CONSTRAINT: the bridge NEVER asserts hardware. The published cmcp_verify
-    # (v0.2.x, Phase 1) checks only the measurement format/parse + structure; the hardware ROOT
-    # OF TRUST (TPM EK cert chains, AMD VCEK, Intel DCAP quote signatures) is explicitly deferred
-    # ("out of scope for Phase 1"). So a claim whose forgeable format/parse checks pass lands
-    # 'hardware_attestation' in *verified_fields* with no real silicon check — forgeable by anyone
-    # who controls the gateway key. We never trust it: a claim's platform is recorded as
+    # CRITICAL HONESTY CONSTRAINT: the bridge NEVER asserts hardware. cmcp_verify 0.5.0 can
+    # verify silicon roots (TPM AK/EK chain to a pinned manufacturer CA, AMD VCEK/VLEK, Intel
+    # DCAP quotes) — but only when the caller pins a trusted root, and we pass none. On this path
+    # 'hardware_attestation' can therefore only ever mean "the blob parsed", which is forgeable by
+    # anyone who controls the gateway key. We never trust it: a claim's platform is recorded as
     # CLAIMED-not-verified and hardware_backed is always False. (Pinned by tests/test_hardening C3.)
     hardware_backed = False
 

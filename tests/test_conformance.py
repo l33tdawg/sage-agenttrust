@@ -37,4 +37,22 @@ print(f"  cMCP RuntimeClaim PASSES agentrust-trace-tests Level 0  (fmt={fmt}, 0 
 res1 = run(data, fmt, level=1)
 assert _failures(res1) > 0, "software-only must NOT pass Level 1"
 print(f"  software-only correctly FAILS Level 1 ({_failures(res1)} failures) — no hardware root claimed")
+
+# The standalone C-2 Trust Record the bridge itself mints, graded by the same suite. It is
+# signed canonical-JSON-per-RFC-8785 by agentrust_trace.sign_record, so it must also pass
+# Level 0 and must also fail Level 1 on software-only.
+from bridge.identity import AgentKey
+from bridge.trace_record import mint_record
+
+_k = AgentKey.generate()
+_c2 = mint_record(_k, submit_body=b'{"content":"conformance-probe"}')
+p2 = tempfile.mktemp(suffix=".json"); open(p2,"w").write(json.dumps(_c2))
+data2, fmt2 = load_record(p2)
+assert fmt2 == "trace", fmt2
+res0b = run(data2, fmt2, level=0)
+assert _failures(res0b) == 0, "bare C-2 Trust Record must pass trace-tests Level 0"
+print(f"  C-2 Trust Record PASSES agentrust-trace-tests Level 0  (fmt={fmt2}, 0 failures)")
+res1b = run(data2, fmt2, level=1)
+assert _failures(res1b) > 0, "software-only must NOT pass Level 1"
+print(f"  C-2 software-only correctly FAILS Level 1 ({_failures(res1b)} failures) — no hardware root claimed")
 print("CONFORMANCE TESTS PASSED")

@@ -5,6 +5,12 @@ unmodified SAGE consensus-memory node** with a verified AgentTrust attestation, 
 attested **identity** to the on-chain memory author. Runs entirely against released PyPI
 packages (`cmcp-runtime`, `agentrust-trace`); SAGE core needs no changes.
 
+**Verified against** (2026-09-15): SAGE `v11.19.22`
+(`ghcr.io/l33tdawg/sage@sha256:380fcae7…`, stock and unmodified), `agentrust-trace` 0.10.0,
+`cmcp-runtime` 0.5.0, `agentrust-trace-tests` 0.5.1. The offline suite and the live end-to-end
+demo (attested submit → consensus commit → provenance badge) were both run against exactly
+those versions.
+
 [SAGE](https://github.com/l33tdawg/sage) is consensus-validated agent memory (memories go
 through BFT consensus, carry confidence, decay). [AgentTrust](https://github.com/agentrust-io)
 provides agent execution attestation (cMCP gateway + the TRACE evidence format). This bridge
@@ -13,12 +19,12 @@ lets a SAGE memory submission be committed **with** its attestation evidence, re
 provenance, not a truth claim.
 
 > **Scope (read this first).** Two things this bridge does **not** do:
-> 1. **No hardware attestation.** Against the **published** AgentTrust packages (v0.2.x) it
->    verifies an **edge-verified cryptographic identity** (C-2's `cnf == author` key equality)
->    **plus policy/catalog-hash provenance** — *not* hardware. The published `cmcp_verify`
->    defers all silicon-root checks (TPM EK chains, AMD VCEK, Intel DCAP quote signatures) as
->    "out of scope for Phase 1," so the bridge **never** asserts `hardware_backed` and treats a
->    claimed TEE platform as self‑declared.
+> 1. **No hardware attestation.** It verifies an **edge-verified cryptographic identity** (C-2's
+>    `cnf == author` key equality) **plus policy/catalog-hash provenance** — *not* hardware.
+>    `cmcp_verify` 0.5.0 does carry real silicon-root checks now (TPM AK/EK chains to a pinned
+>    manufacturer CA, AMD VCEK/VLEK, Intel DCAP quotes), but they only run when the caller pins a
+>    trusted root, and this bridge pins none. So the bridge **never** asserts `hardware_backed`
+>    and treats a claimed TEE platform as self-declared.
 > 2. **Only the submit endpoint is gated.** It attestation-gates `POST /v1/memory/submit` only.
 >    Other SAGE writes (`/forget`, `/vote`, `/corroborate`, `/challenge`, governance, access)
 >    **pass through ungated** to SAGE's own Ed25519 auth + RBAC — they are out of scope for this
@@ -51,7 +57,7 @@ why the node needs no changes.
 | Path | Role | Attestation | Binding to SAGE author |
 |---|---|---|---|
 | **C-2 per-agent** (`bridge/trace_verify.py`) | **enforcing — the security path** | a standalone TRACE record whose `cnf` **is** the agent's SAGE Ed25519 key | **cryptographic key equality** (`cnf.jwk.x` decodes to `X-Agent-ID`, canonical-encoding enforced) **+ per-write body binding** (`tool_transcript.hash == sha256(body)`). This is the strong, write-scoped guarantee. |
-| **C-1 cMCP** (`bridge/cmcp_adapter.py`) | **advisory — session provenance** | a cMCP RuntimeClaim, signature/policy/catalog verified via published `cmcp_verify.verify_trace_claim`; passes `agentrust-trace-tests` **0.1.0 Level 0** | **gateway-asserted** identity (exact match on `gateway.agent_identity.agent_id`). A RuntimeClaim is **session-scoped with no per-write binding**, and the controlling agent can re-mint claims — so C-1 is *provenance that an agent ran behind an attested gateway*, **not** per-write authorization. |
+| **C-1 cMCP** (`bridge/cmcp_adapter.py`) | **advisory — session provenance** | a cMCP RuntimeClaim, signature/policy/catalog verified via published `cmcp_verify.verify_trace_claim`; passes `agentrust-trace-tests` **0.5.1 Level 0** | **gateway-asserted** identity (exact match on `gateway.agent_identity.agent_id`). A RuntimeClaim is **session-scoped with no per-write binding**, and the controlling agent can re-mint claims — so C-1 is *provenance that an agent ran behind an attested gateway*, **not** per-write authorization. |
 
 Both paths **gate** the write in `enforcing` mode — a valid attestation of *either* kind admits
 the write; a missing/invalid one returns 422. "advisory" vs "the security path" describe the
@@ -61,10 +67,16 @@ guarantee, C-1 only session provenance. (C-1 is disabled — every cMCP claim 42
 
 The proxy de-duplicates byte-identical attestations within their freshness window
 (`bridge/proxy.py` `ReplayCache`) to stop naive third-party replay — this is **not** a per-write
-authorization control (C-2's body binding is). `agentrust-trace-tests` cryptographically grades
-only the cMCP-envelope form; it **rejects** a bare C-2 record (`LoadError`: a `signature` field
-without `cmcp_version`), so we make **no** conformance-level claim for C-2 — its binding is
-bridge-verified.
+authorization control (C-2's body binding is).
+
+**Both paths are graded by `agentrust-trace-tests` 0.5.1, and both pass Level 0.** That is an
+upgrade on the first release of this bridge: `agentrust-trace-tests` 0.1.0 raised `LoadError` on
+a standalone TRACE record (a `signature` field with no `cmcp_version`), so the C-2 path carried
+**no** conformance claim at all and its binding rested entirely on bridge-side verification. The
+0.5.1 loader accepts the bare record as `fmt="trace"`, which lets the bridge assert the stronger
+and still-honest pair for both paths: Level 0 **passes** with 0 failing findings, and Level 1
+**fails** — software-only has no hardware root. `tests/test_conformance.py` fails if either half
+of that stops being true.
 
 ## What this does NOT claim
 
@@ -82,21 +94,26 @@ Per [agentrust-io/integrations CONTRIBUTING rule 4](https://github.com/agentrust
 - **Attestation ≠ content truth.** It authenticates the *author and policy* of a write, not
   whether the content is correct. SAGE's `ContentHash` and `confidence_score` remain
   client-asserted; a legitimately-attested agent can still write a wrong memory.
-- **C-1 (cMCP) is session provenance, not per-write authorization, with no trust root.** A cMCP
-  RuntimeClaim has no field binding it to a particular SAGE body, and the agent controls the
+- **C-1 (cMCP) is session provenance, not per-write authorization, with no trust root here.** A
+  cMCP RuntimeClaim has no field binding it to a particular SAGE body, and the agent controls the
   gateway key, so it can re-mint claims at will. In this configuration the gateway signing key is
   **not anchored to any trusted issuer** — a valid C-1 signature authenticates only the claim's
   structure and that its policy/catalog hashes match the configured approved set; anyone can mint
   a signature-valid claim naming any `agent_id`. C-1 therefore attests *that an agent operated
   behind an attested gateway during a session*, not the truth or authorization of any write. The
-  write-scoped, key-equal guarantee is **C-2**'s.
-- **Canonicalization follows the published library, not RFC 8785.** The bridge signs/verifies
-  TRACE records with the exact recipe `agentrust_trace.sign` uses (sorted-keys compact JSON,
-  `ensure_ascii=True`) so it interoperates with the library. That recipe equals RFC 8785 / JCS
-  only for ASCII string content with integer numbers; for non-ASCII string fields (e.g. a
-  Unicode `domain_tag`) **and for IEEE 754 number serialization** the bytes diverge from a
-  spec-conformant verifier. This is an upstream `agentrust_trace` gap; use ASCII string fields
-  (and integer numerics) for cross-verifier interop.
+  write-scoped, key-equal guarantee is **C-2**'s. `verify_trace_claim` 0.5.0 *can* anchor this —
+  it accepts `trusted_public_key_hex`, `trusted_agent_manifest_keys`, `trusted_tpm_ca_pem`,
+  `trusted_ark_pem` / `trusted_intel_root_pem` and `expected_gateway_measurement` — but this
+  bridge configures none of them, so the weaker statement is the honest one for this deployment.
+  Wiring those through is the path to an anchored C-1 claim.
+- **Canonicalization is RFC 8785 (JCS), and the bridge follows the library.** From
+  `agentrust-trace` 0.10.0, `sign_record` canonicalizes with `rfc8785.dumps`, as spec §3.2.2
+  requires, and the bridge uses the same recipe for its signature check and for the attestation
+  digest it pins — so the bytes it accepts are the bytes a spec-conformant third-party verifier
+  computes. Earlier releases of the library used `json.dumps(sort_keys=True, ensure_ascii=True)`,
+  which diverges from JCS for non-ASCII strings and for number formatting; the bridge tracked that
+  older recipe deliberately to stay interoperable with the library, and this refresh moved both
+  forward together.
 - **The provenance badge endpoint is unauthenticated.** `GET /v1/attestation/{memory_id}` is
   public read-only and returns no secrets, but it does disclose the attestation digest, `cnf`
   thumbprint, and SPIFFE subject for any known `memory_id`. Gate it behind SAGE's auth if that
@@ -121,11 +138,12 @@ Per [agentrust-io/integrations CONTRIBUTING rule 4](https://github.com/agentrust
 
 ```bash
 python -m venv .venv && . .venv/bin/activate
-pip install -e ".[dev]"     # runtime: agentrust-trace, cmcp-runtime, cryptography, httpx, starlette, uvicorn · dev: agentrust-trace-tests + pynacl (offline mock only)
+pip install -e ".[dev]"     # runtime: agentrust-trace, cmcp-runtime, cryptography, httpx, rfc8785, starlette, uvicorn · dev: agentrust-trace-tests + pynacl (offline mock only)
 
-# 1) a stock SAGE node, isolated in Docker (no host mount = ephemeral)
-docker run -d --name sage-demo -p 127.0.0.1:18080:8080 \
-  -e SAGE_PASSPHRASE=demo-passphrase ghcr.io/l33tdawg/sage:latest serve
+# 1) a stock SAGE node, isolated in Docker (no host mount = ephemeral). Pinned by digest to the
+#    v11.19.22 release this bridge is verified against, so :latest moving cannot invalidate it.
+docker run -d --name sage-demo -p 127.0.0.1:18080:8080 -e SAGE_PASSPHRASE=demo-passphrase \
+  ghcr.io/l33tdawg/sage@sha256:380fcae7b86712d5882a8c3676265d976d7a96a3eeed74559079994cd63f6b0a serve
 
 # 2) the bridge proxy in front of it
 SAGE_UPSTREAM=http://127.0.0.1:18080 uvicorn bridge.app:app --port 19090

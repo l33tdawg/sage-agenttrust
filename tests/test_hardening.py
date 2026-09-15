@@ -118,18 +118,36 @@ async def amain():
     assert r.status_code == 422, (r.status_code, r.text)
     print("  [F1b] C-2 record with non-dict runtime -> 422 (no 500 DoS)  OK")
 
-def test_C6_tracetests_rejects_bare_c2():
+def test_C6_tracetests_grades_bare_c2():
+    """The bare C-2 record is now GRADED, not merely rejected.
+
+    Until agentrust-trace-tests 0.5.1 the loader raised LoadError on a standalone TRACE
+    record (a `signature` field with no `cmcp_version`), so the bridge could claim no
+    conformance level for the C-2 path and said so in the README. The loader now accepts it
+    as fmt="trace". That upgrade lets us assert the stronger, still-honest pair: the record
+    PASSES Level 0, and FAILS Level 1 because software-only carries no hardware root.
+    """
     try:
-        from trace_tests.loader import load_record, LoadError
+        from trace_tests.loader import load_record
+        from trace_tests.runner import run
     except ModuleNotFoundError:
         print("  [C6] (agentrust-trace-tests not installed; skipped)"); return
     k = AgentKey.generate()
     rec = mint_record(k, submit_body=b'{"x":1}')
     p = tempfile.mktemp(suffix=".json"); open(p,"w").write(json.dumps(rec))
-    try:
-        load_record(p); assert False, "trace-tests should reject a bare C-2 record"
-    except LoadError:
-        print("  [C6] agentrust-trace-tests LoadError-rejects a bare C-2 record (pins the doc claim)  OK")
+    data, fmt = load_record(p)
+    assert fmt == "trace", f"expected a bare TRACE record to load as 'trace', got {fmt!r}"
+
+    def failures(level):
+        return sum(1 for findings in run(data, fmt, level=level).values()
+                   for f in findings if f.failed())
+
+    f0 = failures(0)
+    assert f0 == 0, f"bare C-2 record must pass trace-tests Level 0, {f0} findings failed"
+    f1 = failures(1)
+    assert f1 > 0, "software-only must NOT pass Level 1 (no hardware root)"
+    print(f"  [C6] bare C-2 record graded as fmt={fmt}: Level 0 PASS (0 findings), "
+          f"Level 1 correctly FAILS ({f1} findings)  OK")
 
 def test_C10_evidence_concurrency():
     st = EvidenceStore(tempfile.mktemp(suffix=".db"))
@@ -309,7 +327,7 @@ if __name__ == "__main__":
     asyncio.run(astore_failure_degrades_not_500())
     test_C3b_cmcp_stale_claim_rejected()
     test_C3_hardware_never_branded_even_if_cmcp_verify_claims_it()
-    test_C6_tracetests_rejects_bare_c2()
+    test_C6_tracetests_grades_bare_c2()
     test_C10_evidence_concurrency()
     test_C12_c2_enforce_nonsw_roundtrip()
     print("ALL HARDENING TESTS PASSED")

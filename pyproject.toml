@@ -6,11 +6,16 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "Apache-2.0" }
 authors = [{ name = "Dhillon Andrew Kannabhiran", email = "dhillon.andrew@gmail.com" }]
+# Upper bounds are deliberate. These floors used to be open-ended (>=0.2), so a fresh install
+# silently pulled whatever was current: by September 2026 that was agentrust-trace 0.10.0, whose
+# schema moved eat_profile to a `const` v0.2 URI and whose canonicalization switched to
+# RFC 8785 — two changes that broke this bridge without any dependency event to point at.
 dependencies = [
-    "agentrust-trace>=0.2",
-    "cmcp-runtime>=0.2.1",   # pulls agent-manifest transitively; we don't use it directly
-    "cryptography>=42",      # imported directly (bridge/identity.py, trace_verify.py)
+    "agentrust-trace>=0.10,<0.11",
+    "cmcp-runtime>=0.5,<0.6",   # pulls agent-manifest transitively; we don't use it directly
+    "cryptography>=42",         # imported directly (bridge/identity.py, trace_verify.py)
     "httpx>=0.27",
+    "rfc8785>=0.1.4",           # the JCS pre-image spec 3.2.2 mandates for the signature
     "starlette>=0.37",
     "uvicorn>=0.29",
 ]
@@ -18,7 +23,7 @@ dependencies = [
 [project.optional-dependencies]
 # pynacl is used ONLY by the offline mock SAGE (tests/mock_sage.py) to verify the Ed25519
 # signature exactly like the real node — not by the bridge runtime, which uses `cryptography`.
-dev = ["agentrust-trace-tests>=0.1", "pynacl>=1.5"]
+dev = ["agentrust-trace-tests>=0.5.1,<0.6", "pynacl>=1.5"]
 
 [project.urls]
 Homepage = "https://github.com/l33tdawg/sage-agenttrust"

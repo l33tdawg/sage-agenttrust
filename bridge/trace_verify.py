@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import base64
 import hashlib
-import json
 import re
 import time
 from dataclasses import dataclass, field
@@ -27,6 +26,8 @@ _B64URL = re.compile(r"^[A-Za-z0-9_-]+$")  # urlsafe, no padding (TrustRecord.si
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
+import rfc8785
 
 from bridge.identity import agent_id_matches_cnf, jwk_thumbprint_sha256
 from bridge.trace_record import body_digest
@@ -48,14 +49,15 @@ def _b64u_decode(s: str) -> bytes:
 
 
 def _canonical(record: dict[str, Any]) -> bytes:
-    # This matches agentrust_trace.sign._canonical_bytes EXACTLY (sorted keys, compact,
-    # ensure_ascii=True), so the bridge verifies what the library signs. NOTE: that recipe is
-    # NOT full RFC 8785 / JCS — for non-ASCII string fields it \\u-escapes where JCS keeps UTF-8,
-    # so the signed/digest bytes diverge from a spec-conformant verifier. It equals JCS only for
-    # ASCII content. This is an upstream agentrust_trace gap; the bridge follows the library to
-    # stay interoperable with it. See README "What this does NOT claim".
+    # RFC 8785 (JCS) — the signature pre-image mandated by spec §3.2.2, and what
+    # agentrust_trace.sign._canonical_bytes does from 0.10.0 onward. Before that the library
+    # used a plain json.dumps(sort_keys=True, ensure_ascii=True), which is not JCS: it escapes
+    # non-ASCII where JCS keeps raw UTF-8, and it formats numbers the Python way instead of the
+    # ES shortest-round-trip way. The bridge follows the library so that the signature it
+    # accepts, the digest it pins, and the bytes a spec-conformant third-party verifier
+    # computes are the same.
     body = {k: v for k, v in record.items() if k != "signature"}
-    return json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+    return rfc8785.dumps(body)
 
 
 def verify_record(

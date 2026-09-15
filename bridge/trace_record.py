@@ -12,11 +12,15 @@ import hashlib
 import time
 from typing import Any
 
-from agentrust_trace import TrustRecord, sign_record, validate_json
+from agentrust_trace import TRACE_PROFILE_V0_2, TrustRecord, sign_record, validate_json
 
 from bridge.identity import AgentKey
 
-TRACE_PROFILE = "tag:agentrust.io,2026:trace-v0.1"
+# Taken from the library rather than hardcoded: the schema pins eat_profile to a `const`, so a
+# literal here silently rots at every spec revision. It did: this read
+# "tag:agentrust.io,2026:trace-v0.1" and stopped validating against agentrust-trace 0.10.0,
+# which requires "tag:agentrust-io.com,2026:trace-v0.2".
+TRACE_PROFILE = TRACE_PROFILE_V0_2
 
 
 def body_digest(body: bytes) -> str:
