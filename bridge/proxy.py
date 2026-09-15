@@ -22,7 +22,7 @@ import json
 import os
 import threading
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
 from starlette.applications import Starlette
@@ -32,6 +32,9 @@ from starlette.routing import Route
 
 from bridge.evidence_store import Evidence, EvidenceStore, now
 from bridge.trace_verify import verify_record
+
+if TYPE_CHECKING:  # avoids importing cmcp_verify when only the C-2 path is used
+    from bridge.cmcp_adapter import CmcpTrust
 
 _HOP = {"host", "content-length", "x-attestation", "connection", "keep-alive",
         "transfer-encoding"}
@@ -96,6 +99,7 @@ def build_app(
     cmcp_approved_policy_hash: str | None = None,
     cmcp_approved_catalog_hash: str | None = None,
     cmcp_max_age_seconds: int = 86400,
+    cmcp_trust: CmcpTrust | None = None,
     client: httpx.AsyncClient | None = None,
 ) -> Starlette:
     upstream = (upstream or os.environ.get("SAGE_UPSTREAM", "http://127.0.0.1:18080")).rstrip("/")
@@ -155,6 +159,7 @@ def build_app(
                         approved_policy_hash=cmcp_approved_policy_hash,
                         approved_catalog_hash=cmcp_approved_catalog_hash,
                         max_age_seconds=cmcp_max_age_seconds,
+                        trust=cmcp_trust,
                     )
                 # else: no approved hashes configured -> verdict stays None (rejected under enforcing)
             elif record is not None:
@@ -224,6 +229,7 @@ def build_app(
                         cnf_thumbprint=verdict.cnf_thumbprint,
                         platform=verdict.platform or "unknown",
                         hardware_backed=verdict.hardware_backed,
+                        identity_anchored=verdict.identity_anchored,
                         record=record, verified_at=now(),
                     ))
                 except Exception:  # noqa: BLE001 — evidence is best-effort; the write stands

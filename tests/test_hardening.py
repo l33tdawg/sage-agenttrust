@@ -149,6 +149,79 @@ def test_C6_tracetests_grades_bare_c2():
     print(f"  [C6] bare C-2 record graded as fmt={fmt}: Level 0 PASS (0 findings), "
           f"Level 1 correctly FAILS ({f1} findings)  OK")
 
+def test_C13_cmcp_trust_anchoring():
+    """Decision logic for the opt-in C-1 anchors.
+
+    A genuine TPM/SNP quote cannot be minted here, so verify_trace_claim is stubbed on purpose:
+    what this pins is the BRIDGE's use of its result — that a configured anchor is required
+    rather than decorative, that the library's own failure signal rejects on its own, and that
+    hardware_backed needs a pinned silicon root AND a verified chain.
+    """
+    import types
+    import bridge.cmcp_adapter as ca
+
+    k = AgentKey.generate()
+    claim = {"cmcp_version": "1.0",
+             "trace": {"cnf": {"jwk": {"x": k.cnf["x"]}}, "runtime": {"platform": "amd-sev-snp"}},
+             "gateway": {"agent_identity": {"agent_id": f"spiffe://x/agent/{k.agent_id}"}}}
+    base = ["signature", "attestation_freshness", "policy_bundle.hash", "tool_catalog.hash"]
+
+    def stub(fields, failure=None, details=None, capture=None):
+        def _fake(claim, approved, max_attestation_age_seconds=86400, **kw):
+            if capture is not None:
+                capture.clear(); capture.update(kw)
+            return types.SimpleNamespace(
+                status=types.SimpleNamespace(value="partially_verified"),
+                verified_fields=list(fields), unverified_fields=[],
+                failure_reason=failure, details=details or {})
+        return _fake
+
+    def call(trust=None):
+        return ca.verify_cmcp_claim(claim, agent_id_hex=k.agent_id,
+                                    approved_policy_hash="sha256:" + "a" * 64,
+                                    approved_catalog_hash="sha256:" + "b" * 64, trust=trust)
+
+    orig = ca.verify_trace_claim
+    try:
+        # 1) the pin reaches the library, and a verified pin is reported as anchored
+        captured: dict = {}
+        ca.verify_trace_claim = stub(base + ["trusted_public_key"], capture=captured)
+        v = call(trust=ca.CmcpTrust(trusted_gateway_key_hex="ab" * 32))
+        assert captured.get("trusted_public_key_hex") == "ab" * 32, captured
+        assert v.ok and v.identity_anchored, v.reason
+        print("  [C13] pinned gateway key reaches cmcp_verify and reports anchored  OK")
+
+        # 2) a configured anchor is REQUIRED, not decorative: the same claim with a key that
+        #    does not match the pin is rejected by the library's failure signal
+        ca.verify_trace_claim = stub(base + ["trusted_public_key"],
+                                     failure="PUBLIC_KEY_NOT_BOUND",
+                                     details={"trusted_public_key": "does not match"})
+        v = call(trust=ca.CmcpTrust(trusted_gateway_key_hex="ab" * 32))
+        assert v.ok is False and "PUBLIC_KEY_NOT_BOUND" in (v.reason or ""), v.reason
+        print("  [C13] pinned-key mismatch -> REJECTED (not accepted as an extra field)  OK")
+
+        # 3) the library's failure signal rejects on its own, even when every field we require
+        #    verified and the failing check is outside that set
+        ca.verify_trace_claim = stub(base, failure="PUBLIC_KEY_NOT_BOUND",
+                                     details={"public_key_binding": "substituted key"})
+        v = call()
+        assert v.ok is False, "a library failure must reject even when _REQUIRED all verified"
+        print("  [C13] library failure_reason rejects with all required fields verified  OK")
+
+        # 4) hardware_backed requires BOTH a pinned root and the verified chain
+        ca.verify_trace_claim = stub(base + ["hardware_attestation"])
+        assert call().hardware_backed is False
+        ca.verify_trace_claim = stub(base + ["trusted_public_key", "hardware_attestation"])
+        v = call(trust=ca.CmcpTrust(trusted_gateway_key_hex="ab" * 32))
+        assert v.ok and v.hardware_backed is False, "pinning the gateway key is not hardware"
+        ca.verify_trace_claim = stub(base + ["hardware_attestation"])
+        v = call(trust=ca.CmcpTrust(trusted_tpm_ca_pem=b"-----BEGIN CERTIFICATE-----"))
+        assert v.ok and v.hardware_backed is True, "a pinned silicon root should allow hardware"
+        print("  [C13] hardware_backed only with a pinned silicon root AND verified chain  OK")
+    finally:
+        ca.verify_trace_claim = orig
+
+
 def test_C10_evidence_concurrency():
     st = EvidenceStore(tempfile.mktemp(suffix=".db"))
     def worker(i):
@@ -328,6 +401,7 @@ if __name__ == "__main__":
     test_C3b_cmcp_stale_claim_rejected()
     test_C3_hardware_never_branded_even_if_cmcp_verify_claims_it()
     test_C6_tracetests_grades_bare_c2()
+    test_C13_cmcp_trust_anchoring()
     test_C10_evidence_concurrency()
     test_C12_c2_enforce_nonsw_roundtrip()
     print("ALL HARDENING TESTS PASSED")

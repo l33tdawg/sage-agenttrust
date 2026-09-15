@@ -42,6 +42,9 @@ class Verdict:
     attestation_digest: str | None = None  # sha256 of canonical record (the on-chain pin)
     platform: str | None = None
     hardware_backed: bool = False
+    # C-1 only: True when the gateway signing key was checked against a key the operator pinned
+    # (cmcp_verify's `trusted_public_key`). C-2 is key-equal by construction and leaves this False.
+    identity_anchored: bool = False
 
 
 def _b64u_decode(s: str) -> bytes:

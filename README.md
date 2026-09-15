@@ -19,12 +19,14 @@ lets a SAGE memory submission be committed **with** its attestation evidence, re
 provenance, not a truth claim.
 
 > **Scope (read this first).** Two things this bridge does **not** do:
-> 1. **No hardware attestation.** It verifies an **edge-verified cryptographic identity** (C-2's
->    `cnf == author` key equality) **plus policy/catalog-hash provenance** — *not* hardware.
->    `cmcp_verify` 0.5.0 does carry real silicon-root checks now (TPM AK/EK chains to a pinned
->    manufacturer CA, AMD VCEK/VLEK, Intel DCAP quotes), but they only run when the caller pins a
->    trusted root, and this bridge pins none. So the bridge **never** asserts `hardware_backed`
->    and treats a claimed TEE platform as self-declared.
+> 1. **Hardware attestation is opt-in, and off by default.** Out of the box the bridge verifies an
+>    **edge-verified cryptographic identity** (C-2's `cnf == author` key equality) **plus
+>    policy/catalog-hash provenance** — *not* hardware. `cmcp_verify` 0.5.0 can verify a silicon
+>    root (TPM AK/EK chain to a pinned manufacturer CA, AMD VCEK/VLEK, Intel DCAP quotes), but only
+>    against a root the caller pins, and the bridge ships pinning none — so it reports
+>    `hardware_backed: false` and surfaces a claimed TEE platform as self-declared
+>    (`platform_claimed`). [Anchoring the C-1 path](#anchoring-the-c-1-path-optional) changes that,
+>    and the badge says which state you are in.
 > 2. **Only the submit endpoint is gated.** It attestation-gates `POST /v1/memory/submit` only.
 >    Other SAGE writes (`/forget`, `/vote`, `/corroborate`, `/challenge`, governance, access)
 >    **pass through ungated** to SAGE's own Ed25519 auth + RBAC — they are out of scope for this
@@ -94,18 +96,15 @@ Per [agentrust-io/integrations CONTRIBUTING rule 4](https://github.com/agentrust
 - **Attestation ≠ content truth.** It authenticates the *author and policy* of a write, not
   whether the content is correct. SAGE's `ContentHash` and `confidence_score` remain
   client-asserted; a legitimately-attested agent can still write a wrong memory.
-- **C-1 (cMCP) is session provenance, not per-write authorization, with no trust root here.** A
-  cMCP RuntimeClaim has no field binding it to a particular SAGE body, and the agent controls the
-  gateway key, so it can re-mint claims at will. In this configuration the gateway signing key is
-  **not anchored to any trusted issuer** — a valid C-1 signature authenticates only the claim's
-  structure and that its policy/catalog hashes match the configured approved set; anyone can mint
-  a signature-valid claim naming any `agent_id`. C-1 therefore attests *that an agent operated
-  behind an attested gateway during a session*, not the truth or authorization of any write. The
-  write-scoped, key-equal guarantee is **C-2**'s. `verify_trace_claim` 0.5.0 *can* anchor this —
-  it accepts `trusted_public_key_hex`, `trusted_agent_manifest_keys`, `trusted_tpm_ca_pem`,
-  `trusted_ark_pem` / `trusted_intel_root_pem` and `expected_gateway_measurement` — but this
-  bridge configures none of them, so the weaker statement is the honest one for this deployment.
-  Wiring those through is the path to an anchored C-1 claim.
+- **C-1 (cMCP) is session provenance, not per-write authorization — anchored only if you anchor
+  it.** A cMCP RuntimeClaim has no field binding it to a particular SAGE body, and the agent
+  controls the gateway key, so it can re-mint claims at will. With no anchor configured (the
+  default) the gateway signing key is **not checked against anything** — a valid C-1 signature
+  authenticates only the claim's structure and that its policy/catalog hashes match the configured
+  approved set, so anyone can mint a signature-valid claim naming any `agent_id`. C-1 therefore
+  attests *that an agent operated behind an attested gateway during a session*, not the truth or
+  authorization of any write. Pinning the gateway key closes the substitution — see below — but it
+  does not create a per-write binding, which stays **C-2**'s guarantee.
 - **Canonicalization is RFC 8785 (JCS), and the bridge follows the library.** From
   `agentrust-trace` 0.10.0, `sign_record` canonicalizes with `rfc8785.dumps`, as spec §3.2.2
   requires, and the bridge uses the same recipe for its signature check and for the attestation
@@ -133,6 +132,32 @@ Per [agentrust-io/integrations CONTRIBUTING rule 4](https://github.com/agentrust
   the only re-admit gap is a worst-case ~5 s sliver when `iat` is maximally future-dated within
   the skew tolerance. C-2's body binding keeps replays low-impact (a replay can only re-write the
   same body).
+
+## Anchoring the C-1 path (optional)
+
+The cMCP path is the one with a trust root to configure. Every anchor below is off unless you set
+it, and each only ever *adds* a check — an unanchored bridge behaves exactly as it did before.
+
+| Variable | What it pins | What it buys |
+|---|---|---|
+| `CMCP_TRUSTED_GATEWAY_KEY_HEX` | the gateway signing key (hex, `0x` optional) | the pinned-key check becomes **required**: a claim carrying any other key is rejected. Without it, "anyone can mint a claim" is literally true. |
+| `CMCP_TRUSTED_TPM_CA_PEM` | PEM of the manufacturer CA for TPM | `cmcp_verify` verifies the AK/EK chain, not just the quote's format |
+| `CMCP_TRUSTED_ARK_PEM` | PEM for the AMD ARK | the same, for SEV-SNP VCEK chains |
+| `CMCP_TRUSTED_INTEL_ROOT_PEM` | PEM for the Intel SGX root CA | the same, for DCAP quotes |
+| `CMCP_EXPECTED_GATEWAY_MEASUREMENT` | the gateway measurement you expect | binds `report_data` to a value *you* chose rather than one the claim supplied |
+
+```bash
+CMCP_APPROVED_POLICY_HASH=sha256:... CMCP_APPROVED_CATALOG_HASH=sha256:... \
+CMCP_TRUSTED_GATEWAY_KEY_HEX=<hex> CMCP_TRUSTED_TPM_CA_PEM=/etc/sage/trusted-tpm-ca.pem \
+SAGE_UPSTREAM=http://127.0.0.1:18080 uvicorn bridge.app:app --port 19090
+```
+
+A root that cannot be read, or that does not look like a PEM, stops startup rather than leaving the
+bridge looking anchored while checking nothing. `hardware_verified` turns true only when you pinned
+a per-platform root *and* the library reported that chain verified, and the badge's `binding` field
+reads `pinned-issuer ...` instead of `gateway-asserted (no trust root)` once the key check passes.
+Programmatic users get the same surface through `bridge.cmcp_adapter.CmcpTrust`, which also exposes
+`agent_manifest` / `trusted_agent_manifest_keys` (not wired to environment variables here).
 
 ## Run it
 
