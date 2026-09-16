@@ -87,7 +87,18 @@ def verify_record(
     # self-asserted by the agent (the whole record is self-signed), so it is never trusted as
     # evidence of hardware. hardware is ALWAYS unverified here; platform is recorded as claimed.
     hardware_backed = False
-    digest = "sha256:" + hashlib.sha256(_canonical(record)).hexdigest()
+    # RFC 8785 refuses numbers outside the IEEE-754 double domain (2**53+1, NaN, Inf) and any
+    # value it cannot encode, so a record carrying one is REJECTED here rather than crashing the
+    # request: canonicalization failure is an untrusted input, not a server fault. The bytes are
+    # computed once and reused as the signature pre-image, so the digest the bridge pins and the
+    # bytes it verifies can never diverge.
+    try:
+        canonical = _canonical(record)
+    except (ValueError, TypeError) as exc:  # rfc8785.CanonicalizationError subclasses ValueError
+        checks["canonical_form"] = False
+        return Verdict(ok=False, checks=checks,
+                       reason=f"record is not canonically encodable (RFC 8785): {exc}")
+    digest = "sha256:" + hashlib.sha256(canonical).hexdigest()
     thumb = jwk_thumbprint_sha256(x_b64u)
 
     def out(ok: bool, reason: str | None = None) -> Verdict:
@@ -119,7 +130,7 @@ def verify_record(
     try:
         pub = Ed25519PublicKey.from_public_bytes(pub_raw)
         sig = _b64u_decode(sig_b64)
-        pub.verify(sig, _canonical(record))
+        pub.verify(sig, canonical)
         checks["signature"] = True
     except (InvalidSignature, ValueError, TypeError):
         checks["signature"] = False

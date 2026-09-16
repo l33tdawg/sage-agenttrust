@@ -107,6 +107,32 @@ async def main():
     else:
         assert r.status_code == 422, (r.status_code, r.text)
         print(f"  [5] tpm2-asserting claim -> {r.status_code} {r.json()['error']} (not branded hardware)")
+
+    # F1c (C-1): a claim whose numbers fall outside the JCS/IEEE-754 domain is rejected at the
+    # edge with 422, never a 500 — the C-1 digest is canonicalized before the library is called.
+    # Control: an untouched claim from the same minter still commits.
+    up4 = httpx.AsyncClient(transport=httpx.ASGITransport(app=build_mock_sage()), base_url="http://mock")
+    app4 = build_app(upstream="http://mock", store=EvidenceStore(tempfile.mktemp(suffix=".db")),
+                     enforcement="enforcing", client=up4,
+                     cmcp_approved_policy_hash=POL, cmcp_approved_catalog_hash=CAT)
+    # raise_app_exceptions=False => an unhandled raise reaches the test as the wire 500, not a traceback
+    proxy4 = httpx.AsyncClient(transport=httpx.ASGITransport(app=app4, raise_app_exceptions=False),
+                               base_url="http://proxy")
+    headers, body = build_submit(k, content="cmcp jcs control", domain_tag="plant-ops")
+    headers["X-Attestation"] = base64.b64encode(
+        json.dumps(mint_cmcp(k.agent_id), separators=(",", ":")).encode()).decode()
+    r = await proxy4.post("/v1/memory/submit", content=body, headers=headers)
+    assert r.status_code == 200, (r.status_code, r.text)
+    for label, value in {"2**60": 2 ** 60, "NaN": float("nan"), "Inf": float("inf")}.items():
+        headers, body = build_submit(k, content=f"cmcp jcs {label}", domain_tag="plant-ops")
+        claim = mint_cmcp(k.agent_id); claim["audit_chain_length"] = value
+        headers["X-Attestation"] = base64.b64encode(
+            json.dumps(claim, separators=(",", ":")).encode()).decode()
+        r = await proxy4.post("/v1/memory/submit", content=body, headers=headers)
+        assert r.status_code == 422, (label, r.status_code, r.text)
+        got = r.json()
+        assert got["error"] == "attestation_rejected" and got["checks"].get("canonical_form") is False, (label, got)
+    print("  [6] cMCP claim with out-of-domain JCS numbers -> 422 (no 500); valid claim control 200")
     print("ALL CMCP PATH TESTS PASSED")
 
 def mk_wrong():

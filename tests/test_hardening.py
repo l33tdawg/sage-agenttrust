@@ -32,6 +32,54 @@ def test_F1_enforcement_fail_fast():
         assert bad == "enforcing ", f"bad enforcement {bad!r} did NOT fail fast"
     print("  [F1] unrecognized BRIDGE_ENFORCEMENT fails fast (no silent fail-open)  OK")
 
+def _mk_wire(enforcement="enforcing"):
+    """Like mk(), but an unhandled raise surfaces as the 500 a real uvicorn worker would send."""
+    up = httpx.AsyncClient(transport=httpx.ASGITransport(app=build_mock_sage()), base_url="http://mock")
+    app = build_app(upstream="http://mock", store=EvidenceStore(tempfile.mktemp(suffix=".db")),
+                    enforcement=enforcement, client=up)
+    return httpx.AsyncClient(transport=httpx.ASGITransport(app=app, raise_app_exceptions=False),
+                             base_url="http://proxy")
+
+async def test_F1c_jcs_number_domain_rejected():
+    """F1c: a record whose numbers fall outside the JCS/IEEE-754 domain is an explicit 422, not a 500.
+
+    rfc8785 raises IntegerDomainError/FloatDomainError while canonicalizing. The C-2 path
+    canonicalizes the record to compute the pinned digest, and that call had no handler, so an
+    X-Attestation header carrying 2**60 or NaN turned /v1/memory/submit into a 500. Reachable
+    without malice: any integer above 2**53 (a nanosecond-precision timestamp, a large sequence
+    number) is out of domain. Control: the untouched record from the same minter still commits.
+    """
+    k = AgentKey.generate()
+    proxy = _mk_wire()
+
+    h, b = build_submit(k, content="jcs control", domain_tag="d")
+    r = await proxy.post("/v1/memory/submit", content=b, headers=h)
+    assert r.status_code == 200, (r.status_code, r.text)
+
+    cases = {"2**60": 2 ** 60, "2**53+1": 2 ** 53 + 1, "NaN": float("nan"), "Inf": float("inf")}
+    for label, value in cases.items():
+        for where in ("tool_transcript.n", "iat"):
+            h, b = build_submit(k, content=f"jcs {label} {where}", domain_tag="d")
+            rec = json.loads(base64.b64decode(h["X-Attestation"]))
+            if where == "iat":
+                rec["iat"] = value
+            else:
+                rec["tool_transcript"]["n"] = value
+            h["X-Attestation"] = base64.b64encode(json.dumps(rec, separators=(",", ":")).encode()).decode()
+            r = await proxy.post("/v1/memory/submit", content=b, headers=h)
+            assert r.status_code == 422, (label, where, r.status_code, r.text)
+            got = r.json()
+            assert got["error"] == "attestation_rejected", (label, where, got)
+            assert "canonically encodable" in got["detail"], (label, where, got)
+            assert got["checks"].get("canonical_form") is False, (label, where, got)
+
+    # Same guard at the library boundary: verify_record returns a verdict, it never raises.
+    h, b = build_submit(k, content="jcs unit", domain_tag="d")
+    rec = json.loads(base64.b64decode(h["X-Attestation"])); rec["iat"] = 2 ** 60
+    v = verify_record(rec, agent_id_hex=k.agent_id, submit_body=b)
+    assert not v.ok and v.checks.get("canonical_form") is False, v
+    print("  [F1c] out-of-domain JCS numbers (2**60 / 2**53+1 / NaN / Inf) -> 422 rejection, never 500  OK")
+
 async def amain():
     k = AgentKey.generate()
 
@@ -393,6 +441,7 @@ async def astore_failure_degrades_not_500():
 
 if __name__ == "__main__":
     test_F1_enforcement_fail_fast()
+    asyncio.run(test_F1c_jcs_number_domain_rejected())
     asyncio.run(amain())
     asyncio.run(acmcp_not_deduped())
     asyncio.run(acmcp_disabled_without_approved_hashes())

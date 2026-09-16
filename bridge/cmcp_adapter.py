@@ -97,7 +97,16 @@ def verify_cmcp_claim(
     trace = claim.get("trace") if isinstance(claim.get("trace"), dict) else {}
     runtime = trace.get("runtime") if isinstance(trace.get("runtime"), dict) else {}
     platform = runtime.get("platform")
-    digest = "sha256:" + hashlib.sha256(_canonical(claim)).hexdigest()
+    # Same JCS number-domain restriction as the C-2 path: a claim carrying 2**53+1, NaN or Inf
+    # cannot be canonicalized, so reject it explicitly instead of letting rfc8785 raise through
+    # the request (which reaches the client as a 500).
+    try:
+        canonical = _canonical(claim)
+    except (ValueError, TypeError) as exc:
+        checks["canonical_form"] = False
+        return Verdict(ok=False, checks=checks,
+                       reason=f"claim is not canonically encodable (RFC 8785): {exc}")
+    digest = "sha256:" + hashlib.sha256(canonical).hexdigest()
     thumb = None
     try:
         x = trace["cnf"]["jwk"]["x"]
