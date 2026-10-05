@@ -35,6 +35,8 @@ for _ in range(20):
             break
     time.sleep(1)
 print(f"[2] consensus status on the real node: {status}")
+if status != "committed":
+    raise RuntimeError(f"memory {mid} did not reach committed status during polling (last={status!r})")
 
 # 3) provenance badge from the bridge, joined to the committed memory_id
 b = c.get(f"/v1/attestation/{mid}").json()

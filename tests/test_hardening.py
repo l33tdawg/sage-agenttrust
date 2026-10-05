@@ -175,11 +175,8 @@ def test_C6_tracetests_grades_bare_c2():
     as fmt="trace". That upgrade lets us assert the stronger, still-honest pair: the record
     PASSES Level 0, and FAILS Level 1 because software-only carries no hardware root.
     """
-    try:
-        from trace_tests.loader import load_record
-        from trace_tests.runner import run
-    except ModuleNotFoundError:
-        print("  [C6] (agentrust-trace-tests not installed; skipped)"); return
+    from trace_tests.loader import load_record
+    from trace_tests.runner import run
     k = AgentKey.generate()
     rec = mint_record(k, submit_body=b'{"x":1}')
     p = tempfile.mktemp(suffix=".json"); open(p,"w").write(json.dumps(rec))
@@ -198,19 +195,16 @@ def test_C6_tracetests_grades_bare_c2():
           f"Level 1 correctly FAILS ({f1} findings)  OK")
 
 def test_C13_cmcp_trust_anchoring():
-    """Decision logic for the opt-in C-1 anchors.
+    """Software identity pins remain required; unsupported hardware never reaches the library.
 
-    A genuine TPM/SNP quote cannot be minted here, so verify_trace_claim is stubbed on purpose:
-    what this pins is the BRIDGE's use of its result — that a configured anchor is required
-    rather than decorative, that the library's own failure signal rejects on its own, and that
-    hardware_backed needs a pinned silicon root AND a verified chain.
+    Stubbed results exercise adapter decision boundaries, not hardware conformance.
     """
     import types
     import bridge.cmcp_adapter as ca
 
     k = AgentKey.generate()
     claim = {"cmcp_version": "1.0",
-             "trace": {"cnf": {"jwk": {"x": k.cnf["x"]}}, "runtime": {"platform": "amd-sev-snp"}},
+             "trace": {"cnf": {"jwk": {"x": k.cnf["x"]}}, "runtime": {"platform": "software-only"}},
              "gateway": {"agent_identity": {"agent_id": f"spiffe://x/agent/{k.agent_id}"}}}
     base = ["signature", "attestation_freshness", "policy_bundle.hash", "tool_catalog.hash"]
 
@@ -256,16 +250,39 @@ def test_C13_cmcp_trust_anchoring():
         assert v.ok is False, "a library failure must reject even when _REQUIRED all verified"
         print("  [C13] library failure_reason rejects with all required fields verified  OK")
 
-        # 4) hardware_backed requires BOTH a pinned root and the verified chain
-        ca.verify_trace_claim = stub(base + ["hardware_attestation"])
-        assert call().hardware_backed is False
-        ca.verify_trace_claim = stub(base + ["trusted_public_key", "hardware_attestation"])
-        v = call(trust=ca.CmcpTrust(trusted_gateway_key_hex="ab" * 32))
-        assert v.ok and v.hardware_backed is False, "pinning the gateway key is not hardware"
-        ca.verify_trace_claim = stub(base + ["hardware_attestation"])
-        v = call(trust=ca.CmcpTrust(trusted_tpm_ca_pem=b"-----BEGIN CERTIFICATE-----"))
-        assert v.ok and v.hardware_backed is True, "a pinned silicon root should allow hardware"
-        print("  [C13] hardware_backed only with a pinned silicon root AND verified chain  OK")
+        # 4) software manifest identity inputs still reach the verifier unchanged.
+        manifest = {"manifest_id": "test-only"}
+        issuer_keys = {"issuer": b"test-key"}
+        ca.verify_trace_claim = stub(base + ["agent_manifest.binding"], capture=captured)
+        v = call(trust=ca.CmcpTrust(agent_manifest=manifest,
+                                  trusted_agent_manifest_keys=issuer_keys))
+        assert v.ok and not v.hardware_backed, v.reason
+        assert captured["agent_manifest"] == manifest
+        assert captured["trusted_agent_manifest_keys"] == issuer_keys
+        ca.verify_trace_claim = stub(base, failure="AGENT_MANIFEST_MISMATCH")
+        assert not call(trust=ca.CmcpTrust(agent_manifest=manifest,
+                                         trusted_agent_manifest_keys=issuer_keys)).ok
+        print("  [C13] software manifest inputs preserved; verifier failures still reject  OK")
+
+        # 5) every hardware option fails at construction, including empty configured values.
+        for name in ("trusted_ark_pem", "trusted_intel_root_pem", "trusted_tpm_ca_pem",
+                     "expected_gateway_measurement"):
+            for value in (("", "sha256:" + "e" * 64) if name == "expected_gateway_measurement"
+                          else (b"", b"-----BEGIN CERTIFICATE-----")):
+                try:
+                    ca.CmcpTrust(**{name: value})
+                except ValueError as exc:
+                    assert name in str(exc) and "unsupported" in str(exc)
+                else:
+                    raise AssertionError(f"configured {name} silently accepted")
+            # Defend the verification boundary even if an object was restored outside init.
+            restored = ca.CmcpTrust()
+            object.__setattr__(restored, name, value)
+            ca.verify_trace_claim = lambda *a, **kw: (_ for _ in ()).throw(
+                AssertionError("unsupported hardware reached verifier"))
+            v = call(trust=restored)
+            assert not v.ok and not v.hardware_backed and name in v.reason, v.reason
+        print("  [C13] hardware configuration rejected before verification, including restored objects  OK")
     finally:
         ca.verify_trace_claim = orig
 
@@ -377,26 +394,64 @@ def test_C3b_cmcp_stale_claim_rejected():
     print("  [C3b] stale cMCP claim (old attestation_generated_at) -> rejected (freshness)  OK")
 
 def test_C3_hardware_never_branded_even_if_cmcp_verify_claims_it():
-    # C3: even if the published cmcp_verify puts 'hardware_attestation' in verified_fields (its
-    # Phase-1 verifiers don't check a silicon root), the bridge MUST still report hardware_backed=False.
+    import types
     import bridge.cmcp_adapter as ca
-    class _Res:
-        verified_fields = ["signature","attestation_freshness","policy_bundle.hash",
-                           "tool_catalog.hash","hardware_attestation"]
-        class status: value = "verified"
-        failure_reason = None
+    from cmcp_runtime.audit.keys import SigningKey
+    from cmcp_runtime.audit.trace_claim import canonical_json
+    from tests.test_cmcp_path import mint_cmcp, POL, CAT
+    k = AgentKey.generate()
+    signing_key = SigningKey()
+    claim = mint_cmcp(k.agent_id, signing_key=signing_key)
+    # A real software claim and gateway-key pin still verify with the published library.
+    pin = base64.urlsafe_b64decode(claim["trace"]["cnf"]["jwk"]["x"] + "==").hex()
+    args = dict(agent_id_hex=k.agent_id, approved_policy_hash=POL, approved_catalog_hash=CAT)
+    v = ca.verify_cmcp_claim(claim, trust=ca.CmcpTrust(trusted_gateway_key_hex=pin), **args)
+    assert v.ok and v.identity_anchored and not v.hardware_backed, v.reason
+    v = ca.verify_cmcp_claim(claim, trust=ca.CmcpTrust(trusted_gateway_key_hex="00" * 32), **args)
+    assert not v.ok, "a substituted gateway key must still fail"
+    # Pre-software-only producers used TPM's enum with an explicit non-attested sentinel.
+    claim["trace"]["runtime"]["platform"] = "tpm2"
+    claim["signature"] = base64.urlsafe_b64encode(signing_key.sign(canonical_json(claim))).rstrip(b"=").decode()
+    v = ca.verify_cmcp_claim(claim, trust=ca.CmcpTrust(trusted_gateway_key_hex=pin), **args)
+    assert v.ok and v.identity_anchored and not v.hardware_backed, v.reason
+
     orig = ca.verify_trace_claim
-    ca.verify_trace_claim = lambda *a, **k: _Res()
     try:
-        k = AgentKey.generate()
-        claim = {"cmcp_version":"1.0",
-                 "trace":{"cnf":{"jwk":{"x":k.cnf["x"]}}, "runtime":{"platform":"amd-sev-snp"}},
-                 "gateway":{"agent_identity":{"agent_id":f"spiffe://x/agent/{k.agent_id}"}}}
-        v = ca.verify_cmcp_claim(claim, agent_id_hex=k.agent_id,
-                                 approved_policy_hash="sha256:"+"a"*64, approved_catalog_hash="sha256:"+"b"*64)
-        assert v.ok is True, v.reason
-        assert v.hardware_backed is False, "bridge must NOT trust cmcp_verify's hardware_attestation field"
-        print("  [C3] cmcp_verify claims hardware_attestation -> bridge STILL reports hardware_backed=False  OK")
+        ca.verify_trace_claim = lambda *a, **kw: (_ for _ in ()).throw(
+            AssertionError("hardware-shaped claim reached old verifier"))
+        for platform in ("amd-sev-snp", "intel-tdx", "tpm2", "azure-cvm-sev-snp", "unknown", None):
+            claim["trace"]["runtime"]["platform"] = platform
+            claim["trace"]["runtime"]["firmware_version"] = (
+                "hardware-tpm" if platform == "tpm2" else "software-only-dev-mode")
+            v = ca.verify_cmcp_claim(claim, **args)
+            assert not v.ok and not v.hardware_backed and "unsupported" in v.reason, v.reason
+        for platform in ("software-only", "tpm2"):
+            claim["trace"]["runtime"]["platform"] = platform
+            claim["trace"]["runtime"]["firmware_version"] = "software-only-dev-mode"
+            for value in ({}, {"raw_evidence": "hardware-blob"}, "malformed"):
+                claim["gateway"]["attestation_evidence"] = value
+                v = ca.verify_cmcp_claim(claim, **args)
+                assert not v.ok and "unsupported" in v.reason and not v.hardware_backed
+            del claim["gateway"]["attestation_evidence"]
+            for name in ("raw_evidence", "quote_signature", "cert_chain", "ek_cert_chain"):
+                claim["trace"]["runtime"][name] = "hardware-blob"
+                v = ca.verify_cmcp_claim(claim, **args)
+                assert not v.ok and "unsupported" in v.reason and not v.hardware_backed
+                del claim["trace"]["runtime"][name]
+        runtime = claim["trace"].pop("runtime")
+        v = ca.verify_cmcp_claim(claim, **args)
+        assert not v.ok and "unsupported" in v.reason
+        claim["trace"]["runtime"] = ["malformed"]
+        v = ca.verify_cmcp_claim(claim, **args)
+        assert not v.ok and "unsupported" in v.reason
+        claim["trace"]["runtime"] = runtime
+        ca.verify_trace_claim = lambda *a, **kw: types.SimpleNamespace(
+            verified_fields=["signature", "attestation_freshness", "policy_bundle.hash",
+                             "tool_catalog.hash", "hardware_attestation"],
+            status=types.SimpleNamespace(value="verified"), failure_reason=None)
+        v = ca.verify_cmcp_claim(claim, **args)
+        assert not v.ok and not v.hardware_backed, "old verifier hardware success must fail closed"
+        print("  [C3] current/legacy software pins work; hardware evidence/platforms/verifier assertions reject  OK")
     finally:
         ca.verify_trace_claim = orig
 

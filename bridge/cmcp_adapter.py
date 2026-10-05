@@ -7,17 +7,16 @@ it to the SAGE author.
 
 Identity binding differs from the per-agent (C-2) path:
   * C-2: cnf key IS the SAGE author key  (cryptographic equality).
-  * C-1: the RuntimeClaim's cnf is the *gateway* TEE key; the agent is named in
+  * C-1: the RuntimeClaim's cnf is the *gateway* signing key; the agent is named in
          gateway.agent_identity (SPIFFE + agent-manifest binding). So here we bind by
          checking gateway.agent_identity.agent_id == the SAGE X-Agent-ID the gateway
          asserts for this session. Weaker than C-2 (gateway-asserted, not key-equal),
          and documented as such.
 
-Identity anchoring is opt-in. With no anchors configured (`trust=None`, the default) the
-gateway key is taken on trust and no silicon root is checked, so the binding stays
-"gateway-asserted" and hardware_backed is always False. Supplying `CmcpTrust` pins the
-gateway key and/or a silicon root, and only then can this path report an anchored identity or
-a hardware root — each only when the library actually verified the corresponding check.
+Identity anchoring is opt-in: `CmcpTrust` can pin a software gateway key and Agent Manifest
+issuer keys. Hardware verification is unsupported on the pinned cmcp-runtime 0.5 series:
+silicon-root/measurement configuration and non-software C-1 claims fail closed. The bridge
+never reports hardware_backed=True.
 """
 
 from __future__ import annotations
@@ -37,11 +36,10 @@ _REQUIRED = {"signature", "attestation_freshness", "policy_bundle.hash", "tool_c
 
 @dataclass(frozen=True)
 class CmcpTrust:
-    """Operator-pinned anchors for the C-1 path. Every field is optional.
+    """Software C-1 identity anchors. Hardware options are retained only to reject them.
 
-    These are exactly the out-of-band inputs `cmcp_verify.verify_trace_claim` accepts, named
-    for what they pin. Nothing here is self-declared: an anchor only means something because
-    the verifier holds it independently of the claim.
+    The pinned cmcp-runtime 0.5 series predates the 0.7 TPM binding/measurement security fixes.
+    An explicitly requested hardware check must never silently become a software check.
     """
 
     # Pin the gateway signing key. This is the one that changes the security story: with it,
@@ -51,28 +49,32 @@ class CmcpTrust:
     # Bind gateway.agent_identity to an Agent Manifest signed by a key we trust.
     agent_manifest: dict[str, Any] | None = None
     trusted_agent_manifest_keys: dict[str, bytes] | None = None
-    # Silicon roots. Supply the one for your platform; each lets cmcp_verify check a real
-    # chain instead of only the measurement's format.
+    # Unsupported under the current dependency pin, including empty configured values.
     trusted_ark_pem: bytes | None = None
     trusted_intel_root_pem: bytes | None = None
     trusted_tpm_ca_pem: bytes | None = None
-    # Bind the gateway's measurement to a value the verifier chose.
     expected_gateway_measurement: str | None = None
 
-    @property
-    def silicon_root_pinned(self) -> bool:
-        return any((self.trusted_ark_pem, self.trusted_intel_root_pem, self.trusted_tpm_ca_pem))
+    def __post_init__(self) -> None:
+        self.require_supported_config()
+
+    def require_supported_config(self) -> None:
+        configured = [name for name in (
+            "trusted_ark_pem", "trusted_intel_root_pem", "trusted_tpm_ca_pem",
+            "expected_gateway_measurement",
+        ) if getattr(self, name) is not None]
+        if configured:
+            raise ValueError("hardware verification is unsupported with pinned cmcp-runtime 0.5: "
+                             + ", ".join(configured))
 
     def kwargs(self) -> dict[str, Any]:
         """Only what was configured, so the library's own defaults stay in charge otherwise."""
+        # Repeat at the verifier boundary, including objects restored outside __init__.
+        self.require_supported_config()
         return {k: v for k, v in {
             "trusted_public_key_hex": self.trusted_gateway_key_hex,
             "agent_manifest": self.agent_manifest,
             "trusted_agent_manifest_keys": self.trusted_agent_manifest_keys,
-            "trusted_ark_pem": self.trusted_ark_pem,
-            "trusted_intel_root_pem": self.trusted_intel_root_pem,
-            "trusted_tpm_ca_pem": self.trusted_tpm_ca_pem,
-            "expected_gateway_measurement": self.expected_gateway_measurement,
         }.items() if v is not None}
 
 
@@ -115,13 +117,7 @@ def verify_cmcp_claim(
     except Exception:
         pass
 
-    # HONESTY CONSTRAINT: this is computed after verification, from what the library actually
-    # checked. cmcp_verify 0.5.0 can verify a silicon root (TPM AK/EK chain to a pinned
-    # manufacturer CA, AMD VCEK/VLEK, Intel DCAP quotes) but ONLY when the caller pins one. With
-    # no anchor configured, 'hardware_attestation' in verified_fields means nothing more than
-    # "the blob parsed", which is forgeable by anyone holding the gateway key — so hardware_backed
-    # stays False unless we pinned a root AND the library reported the check as verified.
-    # (Pinned by tests/test_hardening C3 and C13.)
+    # Hardware verification is withdrawn until a newer verifier is separately qualified.
     hardware_backed = False
     identity_anchored = False
 
@@ -130,6 +126,30 @@ def verify_cmcp_claim(
                        attestation_digest=digest, platform=platform,
                        hardware_backed=hardware_backed, identity_anchored=identity_anchored)
 
+    try:
+        trust_kwargs = trust.kwargs() if trust else {}
+    except ValueError as exc:
+        checks["supported_configuration"] = False
+        return out(False, str(exc))
+    # Preserve the old producer's explicitly non-attested development shape as software.
+    # Its platform label alone grants no hardware credit; evidence is refused below.
+    checks["supported_runtime"] = platform == "software-only" or (
+        platform == "tpm2" and runtime.get("firmware_version") == "software-only-dev-mode"
+    )
+    if not checks["supported_runtime"]:
+        return out(False, "C-1 hardware/non-software runtime claims are unsupported with pinned "
+                          "cmcp-runtime 0.5; use software-only or the legacy TPM software-dev shape")
+    gateway = claim.get("gateway") if isinstance(claim.get("gateway"), dict) else {}
+    # Published envelopes carry evidence under gateway.attestation_evidence; the old verifier
+    # also reads legacy fields under runtime. A software label must not hide a hardware request.
+    hardware_evidence = gateway.get("attestation_evidence") is not None or any(
+        runtime.get(name) is not None for name in
+        ("raw_evidence", "quote_signature", "cert_chain", "ek_cert_chain")
+    )
+    checks["supported_evidence"] = not hardware_evidence
+    if hardware_evidence:
+        return out(False, "C-1 hardware evidence is unsupported with pinned cmcp-runtime 0.5")
+
     # F2: a malformed claim can raise inside the published cmcp_verify — never 500; reject it.
     try:
         res = verify_trace_claim(
@@ -137,11 +157,14 @@ def verify_cmcp_claim(
             ApprovedHashes(policy_bundle_hash=approved_policy_hash,
                            tool_catalog_hash=approved_catalog_hash),
             max_attestation_age_seconds=max_age_seconds,
-            **(trust.kwargs() if trust else {}),
+            **trust_kwargs,
         )
     except Exception as exc:  # noqa: BLE001 — convert any verifier crash into a clean reject
         return out(False, f"cmcp claim could not be verified: {type(exc).__name__}")
     verified = set(res.verified_fields)
+    checks["hardware_attestation"] = False
+    if "hardware_attestation" in verified:
+        return out(False, "cmcp-runtime reported unsupported hardware verification for a software claim")
     # A configured anchor is REQUIRED, never a bonus. Without this, pinning the gateway key would
     # only add a verified field, and a claim carrying a DIFFERENT key would still satisfy the
     # four required checks below — exactly the substitution the pin exists to catch.
@@ -165,18 +188,14 @@ def verify_cmcp_claim(
         return out(False, f"cmcp claim failed verification: {res.failure_reason}"
                           + (f" — {detail}" if detail else ""))
 
-    # Anchoring and hardware are reported from the library's own field list, and only then.
+    # Only the supported gateway-key anchoring check can contribute identity strength.
     identity_anchored = "trusted_public_key" in verified
     checks["identity_anchored"] = identity_anchored
-    checks["hardware_attestation"] = "hardware_attestation" in verified
-    hardware_backed = bool(trust and trust.silicon_root_pinned
-                           and "hardware_attestation" in verified)
 
-    # Identity binding (C-1, advisory): gateway-ASSERTED, exact match against agent_id or its
-    # last SPIFFE path segment. NOT cryptographically bound to a manifest (no trusted issuer
-    # keys are plumbed into cmcp_verify Step 5), and the SPIFFE trust domain is not pinned.
+    # Identity binding (C-1, advisory): exact match against agent_id or its last SPIFFE segment.
+    # Optional manifest issuer inputs are forwarded to cmcp_verify, whose failures reject above.
+    # The bridge does not independently pin the SPIFFE trust domain.
     # C-1 is session PROVENANCE, not per-write authorization; see README.
-    gateway = claim.get("gateway") if isinstance(claim.get("gateway"), dict) else {}
     ident = gateway.get("agent_identity") if isinstance(gateway.get("agent_identity"), dict) else {}
     asserted = ident.get("agent_id", "")
     # F3: require a non-empty author AND non-empty asserted id, so an empty X-Agent-ID can't
