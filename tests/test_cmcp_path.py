@@ -13,10 +13,10 @@ from tests.mock_sage import build_mock_sage
 
 POL="sha256:"+"a"*64; CAT="sha256:"+"b"*64
 
-def mint_cmcp(sage_agent_id, *, bind_to=None):
+def mint_cmcp(sage_agent_id, *, bind_to=None, signing_key=None):
     bind = bind_to or sage_agent_id
     claim = generate_trace_claim(
-        session_id="s1", signing_key=SigningKey(),
+        session_id="s1", signing_key=signing_key or SigningKey(),
         attestation_report=AttestationReportInfo(provider="software-only", measurement="", report_data="",
             attestation_generated_at=datetime.now(UTC).isoformat(), attestation_validity_seconds=86400),
         policy_bundle=PolicyBundleInfo(hash=POL, enforcement_mode="enforcing", policy_version="1"),
@@ -75,10 +75,7 @@ async def main():
     assert r.status_code == 422, (r.status_code, r.text)
     print(f"  [4] cMCP claim with policy-hash mismatch -> {r.status_code} {r.json()['error']}")
 
-    # HONESTY INVARIANT: a claim ASSERTING hardware (tpm2) is NEVER branded as verified
-    # hardware. The bridge does not verify hardware roots with published tooling, so such a
-    # claim is at most accepted as edge-only provenance — its badge must show
-    # hardware_verified=False / verification=edge-only and surface the platform only as claimed.
+    # Hardware-shaped C-1 claims are unsupported under the old verifier pin, even without roots.
     proxy3 = mk()
     headers, body = build_submit(k, content="cmcp fake-hardware", domain_tag="plant-ops")
     claim = generate_trace_claim(
@@ -98,15 +95,9 @@ async def main():
     ).model_dump(exclude_none=True)
     headers["X-Attestation"] = base64.b64encode(json.dumps(claim, separators=(",",":")).encode()).decode()
     r = await proxy3.post("/v1/memory/submit", content=body, headers=headers)
-    # Whatever the accept/reject outcome, the bridge must NEVER brand it hardware.
-    if r.status_code == 200:
-        bj = (await proxy3.get(f"/v1/attestation/{r.json()['memory_id']}")).json()
-        assert bj["hardware_verified"] is False and bj["verification"] == "edge-only", bj
-        assert "hardware_backed" not in bj
-        print(f"  [5] tpm2-asserting claim accepted as edge-only; hardware_verified={bj['hardware_verified']} platform_claimed={bj['platform_claimed']}")
-    else:
-        assert r.status_code == 422, (r.status_code, r.text)
-        print(f"  [5] tpm2-asserting claim -> {r.status_code} {r.json()['error']} (not branded hardware)")
+    assert r.status_code == 422, (r.status_code, r.text)
+    assert "unsupported" in r.text, r.text
+    print(f"  [5] hardware-shaped C-1 claim -> {r.status_code} (unsupported, not admitted)")
 
     # F1c (C-1): a claim whose numbers fall outside the JCS/IEEE-754 domain is rejected at the
     # edge with 422, never a 500 — the C-1 digest is canonicalized before the library is called.
@@ -142,4 +133,5 @@ def mk_wrong():
                     cmcp_approved_policy_hash="sha256:"+"e"*64, cmcp_approved_catalog_hash=CAT)
     return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://proxy")
 
-asyncio.run(main())
+if __name__ == "__main__":
+    asyncio.run(main())

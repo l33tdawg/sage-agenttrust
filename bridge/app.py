@@ -14,48 +14,32 @@ Env:
                            per-agent path is active. Set both to your gateway's known-good
                            sha256:<hex> hashes to accept cMCP claims.
 
-  Optional C-1 anchoring (all default unset = the gateway key is taken on trust, no silicon
-  root is checked, and the badge says exactly that):
+  Optional software C-1 identity anchoring (unset = the gateway key is taken on trust):
     CMCP_TRUSTED_GATEWAY_KEY_HEX   pin the gateway signing key (hex, 0x optional). With this,
                                    the trusted_public_key check becomes REQUIRED, so a claim
                                    carrying any other key is rejected.
-    CMCP_TRUSTED_TPM_CA_PEM        path to a PEM of the manufacturer CA you trust for TPM
-    CMCP_TRUSTED_ARK_PEM           path to a PEM for the AMD ARK             (silicon roots)
-    CMCP_TRUSTED_INTEL_ROOT_PEM    path to a PEM for the Intel SGX root CA
-    CMCP_EXPECTED_GATEWAY_MEASUREMENT
-                                   the gateway measurement you expect, bound into report_data
-  Supplying a per-platform root only makes a difference on that platform; a record still never
-  reports hardware_backed unless the library verified the chain against the root you pinned.
+  Unsupported hardware options: CMCP_TRUSTED_TPM_CA_PEM, CMCP_TRUSTED_ARK_PEM,
+  CMCP_TRUSTED_INTEL_ROOT_PEM, CMCP_EXPECTED_GATEWAY_MEASUREMENT. Setting any of these,
+  even to an empty value, refuses startup under pinned cmcp-runtime 0.5.
 """
 import os
-from pathlib import Path
 
 from bridge.cmcp_adapter import CmcpTrust
 from bridge.proxy import build_app
 from bridge.evidence_store import EvidenceStore
 
 
-def _pem_from_env(var: str) -> bytes | None:
-    """Read a pinned PEM, failing fast. A silently-unreadable root would leave the bridge
-    looking anchored while checking nothing, which is worse than not starting."""
-    path = os.environ.get(var)
-    if not path:
-        return None
-    try:
-        data = Path(path).read_bytes()
-    except OSError as exc:
-        raise SystemExit(f"{var}={path!r} could not be read: {exc}") from exc
-    if b"-----BEGIN" not in data:
-        raise SystemExit(f"{var}={path!r} does not look like a PEM certificate bundle")
-    return data
+_hardware_env = [name for name in (
+    "CMCP_TRUSTED_TPM_CA_PEM", "CMCP_TRUSTED_ARK_PEM", "CMCP_TRUSTED_INTEL_ROOT_PEM",
+    "CMCP_EXPECTED_GATEWAY_MEASUREMENT",
+) if name in os.environ]
+if _hardware_env:
+    raise SystemExit("hardware verification is unsupported with pinned cmcp-runtime 0.5: "
+                     + ", ".join(_hardware_env))
 
 
 _trust = CmcpTrust(
     trusted_gateway_key_hex=os.environ.get("CMCP_TRUSTED_GATEWAY_KEY_HEX") or None,
-    trusted_tpm_ca_pem=_pem_from_env("CMCP_TRUSTED_TPM_CA_PEM"),
-    trusted_ark_pem=_pem_from_env("CMCP_TRUSTED_ARK_PEM"),
-    trusted_intel_root_pem=_pem_from_env("CMCP_TRUSTED_INTEL_ROOT_PEM"),
-    expected_gateway_measurement=os.environ.get("CMCP_EXPECTED_GATEWAY_MEASUREMENT") or None,
 )
 # No anchors configured at all is the documented default; pass None so the adapter's unanchored
 # path is provably the one in play rather than an empty object that happens to behave the same.

@@ -7,10 +7,8 @@ from cmcp_runtime.audit.trace_claim import (generate_trace_claim, AttestationRep
 try:
     from trace_tests.loader import load_record
     from trace_tests.runner import run
-except ModuleNotFoundError:
-    print("  SKIPPED conformance: agentrust-trace-tests not installed "
-          "(run `pip install -e \".[dev]\"` to run the conformance stage)")
-    sys.exit(0)
+except ModuleNotFoundError as exc:
+    raise SystemExit("conformance cannot run: install the complete .[dev] dependencies") from exc
 
 def _mint():
     return generate_trace_claim(session_id="s", signing_key=SigningKey(),

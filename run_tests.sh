@@ -8,4 +8,5 @@ echo "== proxy e2e ==";   $PY tests/test_proxy_e2e.py
 echo "== cmcp path ==";   $PY tests/test_cmcp_path.py 2>/dev/null
 echo "== hardening ==";   $PY tests/test_hardening.py 2>/dev/null
 echo "== conformance =="; $PY tests/test_conformance.py
+echo "== evidence gates =="; $PY tests/test_evidence_gates.py
 echo "ALL OFFLINE TESTS PASSED"

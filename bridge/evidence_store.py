@@ -100,8 +100,8 @@ class EvidenceStore:
         # always "edge-only" — it names WHERE verification happened (at the proxy, not re-checked
         # in SAGE consensus), not how strong the evidence is; strength lives in `binding`,
         # `identity_anchored` and `hardware_verified`. The runtime platform is always surfaced as
-        # `platform_claimed` (self-asserted) — `hardware_verified` true means a pinned silicon
-        # root was actually checked, and that requires the operator to have pinned one.
+        # `platform_claimed` (self-asserted). The supported verifier policy is software-only:
+        # preserve historical hardware assertions in storage but never serve them as qualified.
         is_cmcp = "cmcp_version" in ev.record
         if not is_cmcp:
             binding = "key-equal (cnf == author)"
@@ -112,7 +112,9 @@ class EvidenceStore:
         return {
             "edge_verified": True,
             "verification": "edge-only",
-            "hardware_verified": ev.hardware_backed,
+            "hardware_verified": False,
+            "hardware_verification": "legacy-unqualified" if ev.hardware_backed else "unsupported",
+            "historical_hardware_backed": ev.hardware_backed,
             # The binding strength travels WITH the badge, not just in the README.
             "binding": binding,
             "identity_anchored": ev.identity_anchored,
